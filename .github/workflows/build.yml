@@ -1,0 +1,88 @@
+name: SamuraiBuilder
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'Build ID'
+        required: true
+      zip_url:
+        description: 'URL ZIP dari GitHub Releases'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Download ZIP dari GitHub
+        run: |
+          curl -L -f \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            -o project.zip \
+            "${{ github.event.inputs.zip_url }}"
+          echo "ZIP size: $(ls -lh project.zip | awk '{print $5}')"
+
+      - name: Extract ZIP
+        run: unzip -q project.zip -d workspace/
+
+      - name: Build Maven atau Gradle
+        id: build
+        run: |
+          cd workspace
+          TOP=$(ls -1 | head -1)
+          if [ -d "$TOP" ] && [ $(ls | wc -l) -eq 1 ]; then cd "$TOP"; fi
+          echo "build_dir=$(pwd)" >> $GITHUB_OUTPUT
+          if [ -f "pom.xml" ]; then
+            mvn clean package -DskipTests --no-transfer-progress -B
+          elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            if [ -f "gradlew" ]; then
+              chmod +x gradlew && ./gradlew clean build -x test --no-daemon
+            else
+              gradle clean build -x test --no-daemon
+            fi
+          else
+            echo "ERROR: Tidak ada pom.xml atau build.gradle!"
+            exit 1
+          fi
+
+      - name: Cari JAR
+        id: jar
+        run: |
+          BUILD="${{ steps.build.outputs.build_dir }}"
+          JAR=$(find "$BUILD/target" "$BUILD/build/libs" -name "*.jar" \
+            ! -name "*-sources.jar" ! -name "*-javadoc.jar" \
+            ! -name "original-*.jar" ! -name "*-plain.jar" \
+            2>/dev/null | xargs ls -S 2>/dev/null | head -1)
+          if [ -z "$JAR" ]; then
+            echo "ERROR: JAR tidak ditemukan!"
+            exit 1
+          fi
+          echo "jar=$JAR" >> $GITHUB_OUTPUT
+          echo "jar_name=$(basename $JAR)" >> $GITHUB_OUTPUT
+          echo "JAR: $(basename $JAR)"
+
+      - name: Upload JAR ke GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.event.inputs.build_id }}"
+          gh release create "$TAG" \
+            "${{ steps.jar.outputs.jar }}" \
+            --repo "${{ github.repository }}" \
+            --title "Build ${{ github.event.inputs.build_id }}" \
+            --notes "JAR: ${{ steps.jar.outputs.jar_name }}" \
+            --latest=false
+          echo "JAR berhasil diupload ke release: $TAG"
+          
