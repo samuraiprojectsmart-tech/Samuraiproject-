@@ -7,7 +7,7 @@ on:
         description: 'Build ID'
         required: true
       zip_url:
-        description: 'URL ZIP'
+        description: 'URL ZIP dari GitHub Releases'
         required: true
 
 jobs:
@@ -25,13 +25,19 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Download ZIP
-        run: curl -L -f -o project.zip "${{ github.event.inputs.zip_url }}"
+      - name: Download ZIP dari GitHub
+        run: |
+          curl -L -f \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            -o project.zip \
+            "${{ github.event.inputs.zip_url }}"
+          echo "ZIP size: $(ls -lh project.zip | awk '{print $5}')"
 
-      - name: Extract
+      - name: Extract ZIP
         run: unzip -q project.zip -d workspace/
 
-      - name: Build
+      - name: Build Maven atau Gradle
         id: build
         run: |
           cd workspace
@@ -39,19 +45,19 @@ jobs:
           if [ -d "$TOP" ] && [ $(ls | wc -l) -eq 1 ]; then cd "$TOP"; fi
           echo "build_dir=$(pwd)" >> $GITHUB_OUTPUT
           if [ -f "pom.xml" ]; then
-            mvn clean package -DskipTests --no-transfer-progress -B 2>&1 | tee /tmp/build.log
+            mvn clean package -DskipTests --no-transfer-progress -B
           elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
             if [ -f "gradlew" ]; then
-              chmod +x gradlew && ./gradlew clean build -x test --no-daemon 2>&1 | tee /tmp/build.log
+              chmod +x gradlew && ./gradlew clean build -x test --no-daemon
             else
-              gradle clean build -x test --no-daemon 2>&1 | tee /tmp/build.log
+              gradle clean build -x test --no-daemon
             fi
           else
-            echo "FAILED: no pom.xml or build.gradle" > /tmp/build.log
+            echo "ERROR: Tidak ada pom.xml atau build.gradle!"
             exit 1
           fi
 
-      - name: Find JAR
+      - name: Cari JAR
         id: jar
         run: |
           BUILD="${{ steps.build.outputs.build_dir }}"
@@ -60,12 +66,14 @@ jobs:
             ! -name "original-*.jar" ! -name "*-plain.jar" \
             2>/dev/null | xargs ls -S 2>/dev/null | head -1)
           if [ -z "$JAR" ]; then
+            echo "ERROR: JAR tidak ditemukan!"
             exit 1
           fi
           echo "jar=$JAR" >> $GITHUB_OUTPUT
           echo "jar_name=$(basename $JAR)" >> $GITHUB_OUTPUT
+          echo "JAR: $(basename $JAR)"
 
-      - name: Upload to GitHub Releases
+      - name: Upload JAR ke GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -76,4 +84,5 @@ jobs:
             --title "Build ${{ github.event.inputs.build_id }}" \
             --notes "JAR: ${{ steps.jar.outputs.jar_name }}" \
             --latest=false
-            
+          echo "JAR berhasil diupload ke release: $TAG"
+          
