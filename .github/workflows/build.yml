@@ -1,78 +1,57 @@
-name: ⚔️ SamuraiBuilder — Build & Send JAR
+name: SamuraiBuilder
 
 on:
   workflow_dispatch:
     inputs:
       build_id:
-        description: 'Build ID dari website'
+        description: 'Build ID'
         required: true
       zip_url:
-        description: 'URL download ZIP dari website'
-        required: true
-      callback_url:
-        description: 'URL callback InfinityFree untuk terima JAR'
+        description: 'URL ZIP'
         required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: write
 
     steps:
-      - name: ☕ Setup Java 21
+      - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
           cache: maven
 
-      - name: 📥 Download ZIP dari website
-        run: |
-          echo "Build ID : ${{ github.event.inputs.build_id }}"
-          echo "ZIP URL  : ${{ github.event.inputs.zip_url }}"
-          curl -L -f -o project.zip "${{ github.event.inputs.zip_url }}"
-          ls -lh project.zip
+      - name: Download ZIP
+        run: curl -L -f -o project.zip "${{ github.event.inputs.zip_url }}"
 
-      - name: 📂 Extract ZIP
-        run: |
-          unzip -q project.zip -d workspace/
-          ls -la workspace/
+      - name: Extract
+        run: unzip -q project.zip -d workspace/
 
-      - name: ⚙️ Build Maven / Gradle
+      - name: Build
         id: build
         run: |
           cd workspace
           TOP=$(ls -1 | head -1)
-          if [ -d "$TOP" ] && [ $(ls | wc -l) -eq 1 ]; then
-            cd "$TOP"
-          fi
+          if [ -d "$TOP" ] && [ $(ls | wc -l) -eq 1 ]; then cd "$TOP"; fi
           echo "build_dir=$(pwd)" >> $GITHUB_OUTPUT
-
           if [ -f "pom.xml" ]; then
-            echo "build_type=maven" >> $GITHUB_OUTPUT
             mvn clean package -DskipTests --no-transfer-progress -B 2>&1 | tee /tmp/build.log
-
           elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-            echo "build_type=gradle" >> $GITHUB_OUTPUT
             if [ -f "gradlew" ]; then
-              chmod +x gradlew
-              ./gradlew clean build -x test --no-daemon 2>&1 | tee /tmp/build.log
+              chmod +x gradlew && ./gradlew clean build -x test --no-daemon 2>&1 | tee /tmp/build.log
             else
               gradle clean build -x test --no-daemon 2>&1 | tee /tmp/build.log
             fi
-
           else
-            echo "ERROR: Tidak ada pom.xml atau build.gradle!" | tee /tmp/build.log
-            # Kirim notif gagal ke website
-            curl -X POST "${{ github.event.inputs.callback_url }}" \
-              -F "build_id=${{ github.event.inputs.build_id }}" \
-              -F "status=failed" \
-              -F "error=Tidak ada pom.xml atau build.gradle" \
-              --max-time 30 || true
+            echo "FAILED: no pom.xml or build.gradle" > /tmp/build.log
             exit 1
           fi
 
-      - name: 🔍 Cari JAR
+      - name: Find JAR
         id: jar
         run: |
           BUILD="${{ steps.build.outputs.build_dir }}"
@@ -80,29 +59,21 @@ jobs:
             ! -name "*-sources.jar" ! -name "*-javadoc.jar" \
             ! -name "original-*.jar" ! -name "*-plain.jar" \
             2>/dev/null | xargs ls -S 2>/dev/null | head -1)
-
           if [ -z "$JAR" ]; then
-            curl -X POST "${{ github.event.inputs.callback_url }}" \
-              -F "build_id=${{ github.event.inputs.build_id }}" \
-              -F "status=failed" \
-              -F "error=Build sukses tapi JAR tidak ditemukan" \
-              -F "log=$(cat /tmp/build.log | tail -50 | base64 -w 0)" \
-              --max-time 30 || true
             exit 1
           fi
-
           echo "jar=$JAR" >> $GITHUB_OUTPUT
           echo "jar_name=$(basename $JAR)" >> $GITHUB_OUTPUT
-          echo "✔ JAR: $(basename $JAR) ($(du -sh $JAR | cut -f1))"
 
-      - name: 📤 Kirim JAR ke InfinityFree
+      - name: Upload to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Mengirim JAR ke: ${{ github.event.inputs.callback_url }}"
-          curl -X POST "${{ github.event.inputs.callback_url }}" \
-            -F "build_id=${{ github.event.inputs.build_id }}" \
-            -F "status=success" \
-            -F "jar_name=${{ steps.jar.outputs.jar_name }}" \
-            -F "jar=@${{ steps.jar.outputs.jar }}" \
-            --max-time 120
-          echo "✔ JAR berhasil dikirim!"
-          
+          TAG="build-${{ github.event.inputs.build_id }}"
+          gh release create "$TAG" \
+            "${{ steps.jar.outputs.jar }}" \
+            --repo "${{ github.repository }}" \
+            --title "Build ${{ github.event.inputs.build_id }}" \
+            --notes "JAR: ${{ steps.jar.outputs.jar_name }}" \
+            --latest=false
+            
